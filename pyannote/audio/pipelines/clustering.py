@@ -64,7 +64,6 @@ class BaseClustering(Pipeline):
         max_num_embeddings: int = 1000,
         constrained_assignment: bool = False,
     ):
-
         super().__init__()
         self.metric = metric
         self.max_num_embeddings = max_num_embeddings
@@ -77,7 +76,6 @@ class BaseClustering(Pipeline):
         min_clusters: int = None,
         max_clusters: int = None,
     ):
-
         min_clusters = num_clusters or min_clusters or 1
         min_clusters = max(1, min(num_embeddings, min_clusters))
         max_clusters = num_clusters or max_clusters or num_embeddings
@@ -129,7 +127,6 @@ class BaseClustering(Pipeline):
         return embeddings[chunk_idx, speaker_idx], chunk_idx, speaker_idx
 
     def constrained_argmax(self, soft_clusters: np.ndarray) -> np.ndarray:
-
         soft_clusters = np.nan_to_num(soft_clusters, nan=np.nanmin(soft_clusters))
         num_chunks, num_speakers, num_clusters = soft_clusters.shape
         # num_chunks, num_speakers, num_clusters
@@ -172,6 +169,8 @@ class BaseClustering(Pipeline):
         -------
         soft_clusters : (num_chunks, num_speakers, num_clusters)-shaped array
         hard_clusters : (num_chunks, num_speakers)-shaped array
+        centroids : (num_clusters, dimension)-shaped array
+            Clusters centroids
         """
 
         # TODO: option to add a new (dummy) cluster in case num_clusters < max(frame_speaker_count)
@@ -210,7 +209,7 @@ class BaseClustering(Pipeline):
         # TODO: add a flag to revert argmax for trainign subset
         # hard_clusters[train_chunk_idx, train_speaker_idx] = train_clusters
 
-        return hard_clusters, soft_clusters
+        return hard_clusters, soft_clusters, centroids
 
     def __call__(
         self,
@@ -246,6 +245,8 @@ class BaseClustering(Pipeline):
         soft_clusters : (num_chunks, num_speakers, num_clusters) array
             Soft cluster assignment (the higher soft_clusters[c, s, k], the most likely
             the sth speaker of cth chunk belongs to kth cluster)
+        centroids : (num_clusters, dimension) array
+            Centroid vectors of each cluster
         """
 
         train_embeddings, train_chunk_idx, train_speaker_idx = self.filter_embeddings(
@@ -266,7 +267,9 @@ class BaseClustering(Pipeline):
             num_chunks, num_speakers, _ = embeddings.shape
             hard_clusters = np.zeros((num_chunks, num_speakers), dtype=np.int8)
             soft_clusters = np.ones((num_chunks, num_speakers, 1))
-            return hard_clusters, soft_clusters
+            centroids = np.mean(train_embeddings, axis=0, keepdims=True)
+
+            return hard_clusters, soft_clusters, centroids
 
         train_clusters = self.cluster(
             train_embeddings,
@@ -275,7 +278,7 @@ class BaseClustering(Pipeline):
             num_clusters=num_clusters,
         )
 
-        hard_clusters, soft_clusters = self.assign_embeddings(
+        hard_clusters, soft_clusters, centroids = self.assign_embeddings(
             embeddings,
             train_chunk_idx,
             train_speaker_idx,
@@ -283,7 +286,7 @@ class BaseClustering(Pipeline):
             constrained=self.constrained_assignment,
         )
 
-        return hard_clusters, soft_clusters
+        return hard_clusters, soft_clusters, centroids
 
 
 class FINCHClustering(BaseClustering):
@@ -400,6 +403,9 @@ class AgglomerativeClustering(BaseClustering):
         Linkage method.
     threshold : float in range [0.0, 2.0]
         Clustering threshold.
+
+    min_cluster_size : int in range [1, 20]
+        Minimum cluster size
     """
 
     def __init__(
@@ -408,7 +414,6 @@ class AgglomerativeClustering(BaseClustering):
         max_num_embeddings: int = np.inf,
         constrained_assignment: bool = False,
     ):
-
         super().__init__(
             metric=metric,
             max_num_embeddings=max_num_embeddings,
@@ -498,7 +503,6 @@ class AgglomerativeClustering(BaseClustering):
             num_clusters = max_clusters
 
         if num_clusters is not None:
-
             # switch stopping criterion from "inter-cluster distance" stopping to "iteration index"
             _dendrogram = np.copy(dendrogram)
             _dendrogram[:, 2] = np.arange(num_embeddings - 1)
@@ -510,7 +514,6 @@ class AgglomerativeClustering(BaseClustering):
             # from the "optimal" threshold
 
             for iteration in np.argsort(np.abs(dendrogram[:, 2] - self.threshold)):
-
                 # only consider iterations that might have resulted
                 # in changing the number of (large) clusters
                 new_cluster_size = _dendrogram[iteration, 3]
@@ -582,6 +585,7 @@ class OracleClustering(BaseClustering):
 
     def __call__(
         self,
+        embeddings: np.ndarray = None,
         segmentations: SlidingWindowFeature = None,
         file: AudioFile = None,
         frames: SlidingWindow = None,
@@ -591,6 +595,9 @@ class OracleClustering(BaseClustering):
 
         Parameters
         ----------
+        embeddings : (num_chunks, num_speakers, dimension) array, optional
+            Sequence of embeddings. When provided, compute speaker centroids
+            based on these embeddings.
         segmentations : (num_chunks, num_frames, num_speakers) array
             Binary segmentations.
         file : AudioFile
@@ -604,6 +611,8 @@ class OracleClustering(BaseClustering):
         soft_clusters : (num_chunks, num_speakers, num_clusters) array
             Soft cluster assignment (the higher soft_clusters[c, s, k], the most likely
             the sth speaker of cth chunk belongs to kth cluster)
+        centroids : (num_clusters, dimension), optional
+            Clusters centroids if `embeddings` is provided, None otherwise.
         """
 
         num_chunks, num_frames, num_speakers = segmentations.data.shape
@@ -633,7 +642,27 @@ class OracleClustering(BaseClustering):
                 hard_clusters[c, i] = j
                 soft_clusters[c, i, j] = 1.0
 
-        return hard_clusters, soft_clusters
+        if embeddings is None:
+            return hard_clusters, soft_clusters, None
+
+        (
+            train_embeddings,
+            train_chunk_idx,
+            train_speaker_idx,
+        ) = self.filter_embeddings(
+            embeddings,
+            segmentations=segmentations,
+        )
+
+        train_clusters = hard_clusters[train_chunk_idx, train_speaker_idx]
+        centroids = np.vstack(
+            [
+                np.mean(train_embeddings[train_clusters == k], axis=0)
+                for k in range(num_clusters)
+            ]
+        )
+
+        return hard_clusters, soft_clusters, centroids
 
 
 class HiddenMarkovModelClustering(BaseClustering):

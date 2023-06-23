@@ -30,7 +30,7 @@
 
   - last release before complete rewriting
 
-## Version 1.0.1 (2018--07-19)
+## Version 1.0.1 (2018-07-19)
 
   - fix: fix regression in Precomputed.__call__ (#110, #105)
 
